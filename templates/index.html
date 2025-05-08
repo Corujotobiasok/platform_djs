@@ -15,15 +15,16 @@
 
     body {
       font-family: sans-serif;
+      background-color: #121721;
     }
 
     .titlebar {
       height: 38px;
-      background-color: #212529;
+      background-color: #121721;
       color: white;
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: right;
       padding: 0 10px;
       -webkit-app-region: drag;
     }
@@ -45,16 +46,22 @@
       padding: 0;
       width: 26px;
       height: 26px;
+      background-color: #dc3545 !important; 
     }
 
     .content {
-      padding: 20px;
+      padding-top: 20px;
+      background-color: aliceblue;
+      height: 562px;
+      width: 900px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
     }
   </style>
 </head>
 <body>
   <div class="titlebar">
-    <span class="fw-semibold">Mi Aplicación</span>
     <div class="window-controls">
       <button class="btn btn-secondary btn-sm" onclick="window.electronAPI.minimize()" title="Minimizar">_</button>
       <button class="btn btn-secondary btn-sm" onclick="window.electronAPI.maximize()" title="Maximizar">□</button>
@@ -63,8 +70,7 @@
   </div>
 
   <div class="content">
-    <h1>Hola desde tu app en Electron</h1>
-    <p>Esta es una barra personalizada con Bootstrap en Windows.</p>
+    
   </div>
 
   <!-- Bootstrap JS (opcional, no requerido en este caso) -->
