@@ -74,43 +74,85 @@ def clean_filename(title):
 
 @app.route('/single_download', methods=['POST'])
 def single_download():
-    url = request.form['youtube_url']
-    if not url:
-        return "URL inválida", 400
+    url = request.form.get('youtube_url')
+    if not url or 'youtube.com' not in url and 'youtu.be' not in url:
+        return "URL de YouTube inválida", 400
 
     try:
-        # Primero, extraemos la info del video para obtener el título
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        # Configuración para extraer información del video
+        ydl_info = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_info) as ydl:
             info = ydl.extract_info(url, download=False)
             title = info.get('title', f'video_{int(time.time())}')
-            safe_title = secure_filename(title)
+            # Limpieza más exhaustiva del nombre de archivo
+            safe_title = re.sub(r'[^\w\-_\. ]', '', title)[:100].strip()
+            safe_title = secure_filename(safe_title)
+            
+            # Directorio de descargas
+            os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
+            
+            # Ruta temporal única para evitar colisiones
+            temp_filename = f"temp_{int(time.time())}_{safe_title}.mp3"
+            output_path = os.path.join(DOWNLOADS_FOLDER, temp_filename)
+            final_path = os.path.join(DOWNLOADS_FOLDER, f"{safe_title}.mp3")
+            
+            # Opciones de descarga
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': output_path.replace('.mp3', '.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            # Descargar el archivo
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
+                ydl_download.download([url])
+            
+            # Renombrar el archivo temporal al nombre final
+            if os.path.exists(output_path):
+                os.rename(output_path, final_path)
+            else:
+                # Buscar el archivo con posible extensión diferente
+                for f in os.listdir(DOWNLOADS_FOLDER):
+                    if f.startswith(f"temp_{int(time.time())}_"):
+                        os.rename(os.path.join(DOWNLOADS_FOLDER, f), final_path)
+                        break
+            
+            wait_for_file_release(final_path)
+            
+            if not os.path.exists(final_path):
+                return "Error: No se pudo crear el archivo MP3", 500
+                
+            # Enviar el archivo al usuario
+            response = send_file(
+                final_path,
+                as_attachment=True,
+                download_name=f"{safe_title}.mp3",
+                mimetype='audio/mpeg'
+            )
+            
+            # Programar la eliminación del archivo después de enviarlo
+            try:
+                os.unlink(final_path)
+            except:
+                pass
+                
+            return response
 
-        # Creamos la ruta temporal para guardar el archivo mp3
-        output_template = os.path.join(tempfile.gettempdir(), f'{safe_title}.%(ext)s')
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        # Construimos la ruta completa del archivo mp3
-        mp3_path = os.path.join(tempfile.gettempdir(), f"{safe_title}.mp3")
-
-        wait_for_file_release(mp3_path)
-
-        # Te preguntamos dónde guardar usando send_file (el navegador lo pregunta)
-        return send_file(mp3_path, as_attachment=True)
-
+    except yt_dlp.utils.DownloadError as e:
+        return f"Error al descargar el video: {str(e)}", 500
     except Exception as e:
-        return f"Error al descargar: {str(e)}", 500
+        return f"Error inesperado: {str(e)} - Tipo: {type(e)}", 500
 
 
 @app.route('/playlist_download', methods=['POST'])
