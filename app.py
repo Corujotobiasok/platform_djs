@@ -1,11 +1,30 @@
-from flask import Flask, request, render_template, send_from_directory, redirect, url_for
+from flask import Flask, request, render_template, send_file, redirect, url_for, send_file
 import yt_dlp
 import os
 import subprocess
 import shutil
+import tempfile
+import time
+from werkzeug.utils import secure_filename
+import re
+from werkzeug.utils import secure_filename
+import os, tempfile, subprocess, shutil
+
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static/downloads/individuales'
+
+# Rutas absolutas para evitar problemas
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+RESULT_FOLDER = os.path.join(BASE_DIR, 'results')
+DOWNLOADS_FOLDER = os.path.join(BASE_DIR, 'downloads')
+INDIVIDUAL_FOLDER = os.path.join(DOWNLOADS_FOLDER, 'individuales')
+
+# Crear carpetas necesarias
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(RESULT_FOLDER, exist_ok=True)
+os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
+os.makedirs(INDIVIDUAL_FOLDER, exist_ok=True)
 
 # Carpetas
 DOWNLOAD_FOLDER = 'static/downloads'
@@ -18,7 +37,7 @@ os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(INDIVIDUAL_FOLDER, exist_ok=True)
 os.makedirs(ACAPELLAS_FOLDER, exist_ok=True)
 
-# Verificar que FFmpeg esté disponible
+# Verifica que FFmpeg esté disponible
 def check_ffmpeg():
     try:
         subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -27,13 +46,31 @@ def check_ffmpeg():
         return False
 
 if not check_ffmpeg():
-    print("FFmpeg no está instalado. Por favor, instalalo y asegurate de que esté en tu PATH.")
+    print("FFmpeg no está instalado. Por favor, agrégalo al PATH.")
     exit(1)
+
+# Esperar que el archivo esté libre
+def wait_for_file_release(file_path, timeout=10):
+    start_time = time.time()
+    while True:
+        try:
+            with open(file_path, 'rb'):
+                return
+        except PermissionError:
+            if time.time() - start_time > timeout:
+                raise TimeoutError("No se pudo acceder al archivo.")
+            time.sleep(0.1)
+
+# Limpiar nombre para usar en archivos
+def safe_name(name):
+    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 @app.route('/')
 def index():
-    archivos = [f for f in os.listdir(INDIVIDUAL_FOLDER) if f.endswith('.mp3')]
-    return render_template('index.html', archivos=archivos)
+    return render_template('index.html')
+
+def clean_filename(title):
+    return re.sub(r'[\\/*?:"<>|]', '_', title)
 
 @app.route('/single_download', methods=['POST'])
 def single_download():
@@ -42,50 +79,80 @@ def single_download():
         return "URL inválida", 400
 
     try:
-        with yt_dlp.YoutubeDL({
+        # Primero, extraemos la info del video para obtener el título
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', f'video_{int(time.time())}')
+            safe_title = secure_filename(title)
+
+        # Creamos la ruta temporal para guardar el archivo mp3
+        output_template = os.path.join(tempfile.gettempdir(), f'{safe_title}.%(ext)s')
+        ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(INDIVIDUAL_FOLDER, '%(title)s.%(ext)s'),
+            'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
             'quiet': True,
-        }) as ydl:
-            ydl.extract_info(url, download=True)
-            return redirect(url_for('index'))
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Construimos la ruta completa del archivo mp3
+        mp3_path = os.path.join(tempfile.gettempdir(), f"{safe_title}.mp3")
+
+        wait_for_file_release(mp3_path)
+
+        # Te preguntamos dónde guardar usando send_file (el navegador lo pregunta)
+        return send_file(mp3_path, as_attachment=True)
+
     except Exception as e:
         return f"Error al descargar: {str(e)}", 500
+
 
 @app.route('/playlist_download', methods=['POST'])
 def playlist_download():
     url = request.form['playlist_url']
     if not url:
-        return "URL de playlist inválida", 400
+        return "URL inválida", 400
 
     try:
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            playlist_title = info.get('title', 'playlist_sin_nombre').replace('/', '_')
-            playlist_folder = os.path.join(DOWNLOAD_FOLDER, 'playlists', playlist_title)
-            os.makedirs(playlist_folder, exist_ok=True)
+            playlist_title = info.get('title', f'playlist_{int(time.time())}')
+            safe_title = secure_filename(playlist_title)
 
-        with yt_dlp.YoutubeDL({
+        playlist_dir = os.path.join(tempfile.gettempdir(), safe_title)
+        os.makedirs(playlist_dir, exist_ok=True)
+
+        output_template = os.path.join(playlist_dir, '%(title)s.%(ext)s')
+        ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(playlist_folder, '%(title)s.%(ext)s'),
+            'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
             'quiet': True,
-        }) as ydl:
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        return redirect(url_for('index'))
+        for filename in os.listdir(playlist_dir):
+            wait_for_file_release(os.path.join(playlist_dir, filename))
+
+        zip_path = os.path.join(tempfile.gettempdir(), f"{safe_title}.zip")
+        shutil.make_archive(zip_path.replace('.zip', ''), 'zip', playlist_dir)
+
+        return send_file(zip_path, as_attachment=True)
 
     except Exception as e:
-        return f"Error al descargar playlist: {str(e)}", 500
+        return f"Error al descargar la playlist: {str(e)}", 500
 
 @app.route('/subir_y_separar', methods=['POST'])
 def subir_y_separar():
@@ -97,9 +164,16 @@ def subir_y_separar():
         return "Nombre de archivo vacío", 400
 
     if archivo and archivo.filename.endswith('.mp3'):
-        # Limpiar nombre
-        nombre_limpio = archivo.filename.replace("｜", "").replace("|", "").replace("?", "").replace(":", "").strip()
-        filepath = os.path.join(INDIVIDUAL_FOLDER, nombre_limpio)
+        # Crear nombre seguro y único
+        nombre_base = secure_filename(os.path.splitext(archivo.filename)[0])
+        unique_id = str(int(time.time()))
+        carpeta_nombre = f"{nombre_base}_{unique_id}"
+
+        # Crear carpeta temporal
+        carpeta_temporal = os.path.join(tempfile.gettempdir(), carpeta_nombre)
+        os.makedirs(carpeta_temporal, exist_ok=True)
+
+        filepath = os.path.join(carpeta_temporal, f'{carpeta_nombre}.mp3')
         archivo.save(filepath)
 
         try:
@@ -108,31 +182,30 @@ def subir_y_separar():
             subprocess.run(['python', '-m', 'demucs', filepath_abs], check=True)
 
             # Carpeta de salida de Demucs
-            nombre_base = os.path.splitext(nombre_limpio)[0]
-            resultados_dir = os.path.join('extractor', nombre_base)
+            resultados_dir = os.path.join('separated', 'htdemucs', carpeta_nombre)
 
-            # Archivos separados esperados
-            vocals = os.path.join(resultados_dir, 'vocals.wav')
-            no_vocals = os.path.join(resultados_dir, 'no_vocals.wav')
+            # Copiar stems a la carpeta temporal
+            for stem in os.listdir(resultados_dir):
+                origen = os.path.join(resultados_dir, stem)
+                destino = os.path.join(carpeta_temporal, stem)
+                shutil.copy(origen, destino)
 
-            if os.path.exists(vocals):
-                shutil.move(vocals, os.path.join(ACAPELLAS_FOLDER, f'{nombre_base}.wav'))
+            # Crear archivo ZIP
+            zip_path = os.path.join(tempfile.gettempdir(), f"{carpeta_nombre}.zip")
+            shutil.make_archive(zip_path.replace('.zip', ''), 'zip', carpeta_temporal)
 
-
-            # Limpiar carpeta de salida
+            # Limpieza
             shutil.rmtree(resultados_dir, ignore_errors=True)
+            shutil.rmtree(carpeta_temporal, ignore_errors=True)
+
+            # Enviar archivo ZIP al usuario
+            return send_file(zip_path, as_attachment=True)
 
         except Exception as e:
             return f"Error procesando el archivo: {e}", 500
 
-        return redirect(url_for('index'))
-
     return "Archivo inválido. Solo se permiten archivos .mp3", 400
 
-@app.route('/downloads/<path:filename>')
-def download_file(filename):
-    return send_from_directory(DOWNLOAD_FOLDER, filename)
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(debug=True)
